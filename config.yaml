@@ -1,0 +1,9 @@
+ssl:
+  enabled: true
+  ws_addr: "127.0.0.1:28257"
+  ws_origin: "http://localhost/"
+  retry_interval: "5s"
+
+command_ebpf:
+  enabled: false
+  claude_bin: ""
