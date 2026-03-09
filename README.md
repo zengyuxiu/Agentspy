@@ -71,6 +71,34 @@ go generate ./internal/ebpfcmd
 go run ./cmd/agentspy -config ./config.yaml
 ```
 
+## Docker Compose Deployment
+
+The compose stack includes:
+
+- `ecapture` (equivalent to your `docker run` command)
+- `agentspy`
+
+Start:
+
+```bash
+docker compose up -d --build
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+The `ecapture` service runs with:
+
+- `privileged: true`
+- `network_mode: host`
+- `/lib/modules` and `/usr/src` mounted read-only
+- command: `tls --ecaptureq=ws://127.0.0.1:28257/`
+
+Agentspy uses host networking and reads runtime config from `./config.yaml`.
+
 ## Modes
 
 - SSL only: `ssl.enabled=true`, `command_ebpf.enabled=false`

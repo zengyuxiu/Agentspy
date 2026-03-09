@@ -1,0 +1,24 @@
+services:
+  ecapture:
+    image: gojue/ecapture
+    container_name: ecapture
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+    command: ["tls", "--ecaptureq=ws://127.0.0.1:28257/"]
+    volumes:
+      - /lib/modules:/lib/modules:ro
+      - /usr/src:/usr/src:ro
+
+  agentspy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agentspy
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - ecapture
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    command: ["-config", "/app/config.yaml"]
