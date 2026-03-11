@@ -12,7 +12,14 @@ import (
 	pb "github.com/gojue/ecapture/protobuf/gen/v1"
 )
 
-type CommandAuditor struct{}
+type CommandEventAuditor interface {
+	AuditJSON(meta *pb.Event, rawJSON, channel string)
+	AuditCommandEvent(evt ebpfcmd.CommandEvent)
+}
+
+type CommandAuditor struct {
+	matcher ProviderMatcher
+}
 
 type commandCandidate struct {
 	Tool    string
@@ -20,16 +27,19 @@ type commandCandidate struct {
 	Path    string
 }
 
-func NewCommandAuditor() *CommandAuditor {
-	return &CommandAuditor{}
+func NewCommandAuditor(matcher ProviderMatcher) *CommandAuditor {
+	if matcher == nil {
+		matcher = NewProviderRegistry()
+	}
+	return &CommandAuditor{matcher: matcher}
 }
 
 func (c *CommandAuditor) AuditJSON(meta *pb.Event, rawJSON, channel string) {
-	if !isAgentCLIProcess(meta.Pname) {
+	if !c.matcher.MatchesAgentProcess(meta.Pname) {
 		return
 	}
 
-	candidates := extractCommandCandidatesFromJSON(rawJSON)
+	candidates := extractCommandCandidatesFromJSONWithMatcher(rawJSON, c.matcher)
 	if len(candidates) == 0 {
 		return
 	}
@@ -48,7 +58,7 @@ func (c *CommandAuditor) AuditJSON(meta *pb.Event, rawJSON, channel string) {
 
 func (c *CommandAuditor) AuditCommandEvent(evt ebpfcmd.CommandEvent) {
 	actor := defaultValue(evt.Pname, "unknown")
-	if !isAgentCLIProcess(actor) && !isAgentCLIProcess(evt.ParentPname) {
+	if !c.matcher.MatchesAgentProcess(actor) && !c.matcher.MatchesAgentProcess(evt.ParentPname) {
 		return
 	}
 
@@ -66,20 +76,14 @@ func (c *CommandAuditor) AuditCommandEvent(evt ebpfcmd.CommandEvent) {
 		defaultValue(evt.Source, "ebpf"), preview(evt.Command, 160))
 }
 
-func isAgentCLIProcess(pname string) bool {
-	p := strings.ToLower(pname)
-	targets := []string{
-		"claude", "claude-code", "gemini", "gemini-cli",
-	}
-	for _, t := range targets {
-		if strings.Contains(p, t) {
-			return true
-		}
-	}
-	return false
+func extractCommandCandidatesFromJSON(raw string) []commandCandidate {
+	return extractCommandCandidatesFromJSONWithMatcher(raw, defaultProviderRegistry)
 }
 
-func extractCommandCandidatesFromJSON(raw string) []commandCandidate {
+func extractCommandCandidatesFromJSONWithMatcher(raw string, matcher ProviderMatcher) []commandCandidate {
+	if matcher == nil {
+		matcher = defaultProviderRegistry
+	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" || !strings.HasPrefix(raw, "{") {
 		return nil
@@ -92,25 +96,25 @@ func extractCommandCandidatesFromJSON(raw string) []commandCandidate {
 
 	out := make([]commandCandidate, 0, 4)
 	seen := make(map[string]struct{})
-	walkJSONForCommands(root, "", "", &out, seen)
+	walkJSONForCommands(root, "", "", matcher, &out, seen)
 	return out
 }
 
-func walkJSONForCommands(v any, path, tool string, out *[]commandCandidate, seen map[string]struct{}) {
+func walkJSONForCommands(v any, path, tool string, matcher ProviderMatcher, out *[]commandCandidate, seen map[string]struct{}) {
 	switch cur := v.(type) {
 	case map[string]any:
 		currentTool := tool
-		if name, ok := cur["name"].(string); ok && isLikelyCommandTool(name) {
+		if name, ok := cur["name"].(string); ok && matcher.MatchesCommandTool(name) {
 			currentTool = name
 		}
-		if toolName, ok := cur["tool"].(string); ok && isLikelyCommandTool(toolName) {
+		if toolName, ok := cur["tool"].(string); ok && matcher.MatchesCommandTool(toolName) {
 			currentTool = toolName
 		}
 
 		for k, child := range cur {
 			nextPath := appendPath(path, k)
 			if s, ok := child.(string); ok {
-				if (isCommandField(k) || isLikelyCommandTool(currentTool)) && looksLikeShellOrPythonCommand(s) {
+				if (matcher.MatchesCommandField(k) || matcher.MatchesCommandTool(currentTool)) && looksLikeShellOrPythonCommand(s) {
 					addCandidate(out, seen, commandCandidate{
 						Tool:    currentTool,
 						Command: strings.TrimSpace(s),
@@ -119,11 +123,11 @@ func walkJSONForCommands(v any, path, tool string, out *[]commandCandidate, seen
 				}
 				continue
 			}
-			walkJSONForCommands(child, nextPath, currentTool, out, seen)
+			walkJSONForCommands(child, nextPath, currentTool, matcher, out, seen)
 		}
 	case []any:
 		for i, item := range cur {
-			walkJSONForCommands(item, appendPath(path, "["+intToString(i)+"]"), tool, out, seen)
+			walkJSONForCommands(item, appendPath(path, "["+intToString(i)+"]"), tool, matcher, out, seen)
 		}
 	}
 }
@@ -149,34 +153,6 @@ func appendPath(base, next string) string {
 
 func intToString(i int) string {
 	return strconv.Itoa(i)
-}
-
-func isLikelyCommandTool(name string) bool {
-	n := strings.ToLower(strings.TrimSpace(name))
-	tools := []string{
-		"bash", "shell", "sh", "zsh", "terminal", "python",
-		"run_shell_command", "execute_command", "execute_python", "run_python",
-	}
-	for _, t := range tools {
-		if strings.Contains(n, t) {
-			return true
-		}
-	}
-	return false
-}
-
-func isCommandField(key string) bool {
-	k := strings.ToLower(strings.TrimSpace(key))
-	fields := []string{
-		"command", "cmd", "shell_command", "bash_command",
-		"python_command", "python_code", "code", "script",
-	}
-	for _, f := range fields {
-		if k == f {
-			return true
-		}
-	}
-	return false
 }
 
 func looksLikeShellOrPythonCommand(text string) bool {

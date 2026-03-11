@@ -3,6 +3,8 @@ package auditor
 import (
 	"testing"
 
+	"xiu.zyx/agentspy/internal/ebpfcmd"
+
 	pb "github.com/gojue/ecapture/protobuf/gen/v1"
 )
 
@@ -33,6 +35,11 @@ func TestIsLikelyLLMRequest(t *testing.T) {
 			name:    "post_but_unrelated",
 			payload: "POST /upload HTTP/1.1\r\nHost: localhost\r\n\r\n{\"file\":\"a.txt\"}",
 			want:    false,
+		},
+		{
+			name:    "openclaw_post",
+			payload: "POST /v1/openclaw/execute HTTP/1.1\r\nHost: api.openclaw.ai\r\n\r\n{\"input\":\"hi\"}",
+			want:    true,
 		},
 	}
 
@@ -144,5 +151,45 @@ func TestHandleEventHTTP1SSEDoneCleansState(t *testing.T) {
 	a.mu.Unlock()
 	if ok {
 		t.Fatalf("expected stream state to be removed for uuid=%s", evt.Uuid)
+	}
+}
+
+type spyCommandEventAuditor struct {
+	jsonCalls int
+}
+
+func (s *spyCommandEventAuditor) AuditJSON(_ *pb.Event, _ string, _ string) {
+	s.jsonCalls++
+}
+
+func (s *spyCommandEventAuditor) AuditCommandEvent(_ ebpfcmd.CommandEvent) {}
+
+func TestAuditorWithInjectedProviderMatcher(t *testing.T) {
+	t.Parallel()
+
+	spy := &spyCommandEventAuditor{}
+	a := NewAuditor(
+		WithProviderMatcher(NewProviderRegistry(NewOpenClawAuditProvider())),
+		WithCommandEventAuditor(spy),
+	)
+
+	nonOpenclawEvt := &pb.Event{
+		Type:    1,
+		Pname:   "openclaw-cli",
+		Payload: []byte("POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"model\":\"gpt-4o\",\"messages\":[]}"),
+	}
+	a.HandleEvent(nonOpenclawEvt)
+	if spy.jsonCalls != 0 {
+		t.Fatalf("expected zero command-audit json calls for non-openclaw payload, got %d", spy.jsonCalls)
+	}
+
+	openclawEvt := &pb.Event{
+		Type:    1,
+		Pname:   "openclaw-cli",
+		Payload: []byte("POST /v1/openclaw/execute HTTP/1.1\r\nHost: api.openclaw.ai\r\n\r\n{\"input\":\"hi\"}"),
+	}
+	a.HandleEvent(openclawEvt)
+	if spy.jsonCalls != 1 {
+		t.Fatalf("expected one command-audit json call for openclaw payload, got %d", spy.jsonCalls)
 	}
 }

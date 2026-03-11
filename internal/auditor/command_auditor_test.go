@@ -11,6 +11,9 @@ func TestIsAgentCLIProcess(t *testing.T) {
 	if !isAgentCLIProcess("gemini-cli") {
 		t.Fatal("expected gemini-cli to be matched")
 	}
+	if !isAgentCLIProcess("openclaw-cli") {
+		t.Fatal("expected openclaw-cli to be matched")
+	}
 	if isAgentCLIProcess("curl") {
 		t.Fatal("did not expect curl to be matched")
 	}
@@ -64,5 +67,40 @@ func TestExtractCommandCandidatesFromJSONNegative(t *testing.T) {
 	cands := extractCommandCandidatesFromJSON(raw)
 	if len(cands) != 0 {
 		t.Fatalf("expected zero candidates, got %d", len(cands))
+	}
+}
+
+func TestExtractCommandCandidatesFromJSONOpenclaw(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"tool":"openclaw_shell",
+		"arguments":{"openclaw_command":"python3 -c \"print('openclaw')\""}
+	}`
+
+	cands := extractCommandCandidatesFromJSON(raw)
+	if len(cands) == 0 {
+		t.Fatal("expected command candidate for openclaw command")
+	}
+}
+
+func TestExtractCommandCandidatesFromJSONWithMatcherDecoupledProviders(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"tool":"openclaw_shell",
+		"arguments":{"openclaw_command":"python3 -c \"print('openclaw')\""}
+	}`
+
+	claudeOnly := NewProviderRegistry(NewCommonAuditProvider(), NewClaudeCodeAuditProvider())
+	cands := extractCommandCandidatesFromJSONWithMatcher(raw, claudeOnly)
+	if len(cands) != 0 {
+		t.Fatalf("expected zero candidates for claude-only matcher, got %d", len(cands))
+	}
+
+	openclawOnly := NewProviderRegistry(NewCommonAuditProvider(), NewOpenClawAuditProvider())
+	cands = extractCommandCandidatesFromJSONWithMatcher(raw, openclawOnly)
+	if len(cands) == 0 {
+		t.Fatal("expected command candidate for openclaw-only matcher")
 	}
 }

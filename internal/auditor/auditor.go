@@ -25,7 +25,8 @@ type LLMRequest struct {
 type Auditor struct {
 	mu         sync.Mutex
 	sseStreams map[string]*sseParserState
-	cmdAuditor *CommandAuditor
+	matcher    ProviderMatcher
+	cmdAuditor CommandEventAuditor
 }
 
 type sseParserState struct {
@@ -34,11 +35,39 @@ type sseParserState struct {
 	lastSeen    time.Time
 }
 
-func NewAuditor() *Auditor {
-	return &Auditor{
-		sseStreams: make(map[string]*sseParserState),
-		cmdAuditor: NewCommandAuditor(),
+type AuditorOption func(*Auditor)
+
+func WithProviderMatcher(matcher ProviderMatcher) AuditorOption {
+	return func(a *Auditor) {
+		if matcher != nil {
+			a.matcher = matcher
+		}
 	}
+}
+
+func WithCommandEventAuditor(cmdAuditor CommandEventAuditor) AuditorOption {
+	return func(a *Auditor) {
+		if cmdAuditor != nil {
+			a.cmdAuditor = cmdAuditor
+		}
+	}
+}
+
+func NewAuditor(opts ...AuditorOption) *Auditor {
+	a := &Auditor{
+		sseStreams: make(map[string]*sseParserState),
+		matcher:    NewProviderRegistry(),
+	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	if a.matcher == nil {
+		a.matcher = NewProviderRegistry()
+	}
+	if a.cmdAuditor == nil {
+		a.cmdAuditor = NewCommandAuditor(a.matcher)
+	}
+	return a
 }
 
 // HandleEvent 处理具体的业务事件
@@ -59,7 +88,7 @@ func (a *Auditor) HandleCommandEvent(event ebpfcmd.CommandEvent) {
 
 func (a *Auditor) handleRequest(event *pb.Event) {
 	payload := string(event.Payload)
-	if payload == "" || !isLikelyLLMRequest(payload) {
+	if payload == "" || !isLikelyLLMRequestWithMatcher(payload, a.matcher) {
 		return
 	}
 
@@ -125,15 +154,19 @@ func (a *Auditor) auditLLMRequest(meta *pb.Event, req LLMRequest) {
 }
 
 func isLikelyLLMRequest(payload string) bool {
+	return isLikelyLLMRequestWithMatcher(payload, defaultProviderRegistry)
+}
+
+func isLikelyLLMRequestWithMatcher(payload string, matcher ProviderMatcher) bool {
+	if matcher == nil {
+		matcher = defaultProviderRegistry
+	}
 	lower := strings.ToLower(payload)
 	if !strings.Contains(lower, "post ") {
 		return false
 	}
 
-	return strings.Contains(lower, `"messages"`) ||
-		strings.Contains(lower, `"prompt"`) ||
-		strings.Contains(lower, "/chat/completions") ||
-		strings.Contains(lower, "/responses")
+	return matcher.MatchesLLMRequestPayload(lower)
 }
 
 func isLikelySSEResponse(payload string) bool {
