@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -14,17 +12,16 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 )
 
-const uprobeSymbol = "uv_spawn"
-
 type bpfEvent struct {
 	TsNs   uint64
 	Pid    uint32
 	Tgid   uint32
 	Source [16]byte
 	Comm   [16]byte
-	File   [128]byte
+	File   [256]byte
 	Arg0   [128]byte
 	Arg1   [128]byte
+	Arg2   [256]byte
 }
 
 type CommandEvent struct {
@@ -53,9 +50,8 @@ func (m *Module) Start(ctx context.Context, sink func(CommandEvent)) error {
 	if !m.cfg.Enabled {
 		return nil
 	}
-	claudeBin, err := resolveClaudeBinary(m.cfg.ClaudeBinPath)
-	if err != nil {
-		return err
+	if sink == nil {
+		return fmt.Errorf("sink must not be nil")
 	}
 
 	var objs claudeCmdObjects
@@ -64,28 +60,29 @@ func (m *Module) Start(ctx context.Context, sink func(CommandEvent)) error {
 	}
 	defer objs.Close()
 
-	exe, err := link.OpenExecutable(claudeBin)
+	tpOpenat, err := link.Tracepoint("syscalls", "sys_enter_openat", objs.TpOpenat, nil)
 	if err != nil {
-		return fmt.Errorf("open executable %q: %w", claudeBin, err)
+		return fmt.Errorf("attach tracepoint sys_enter_openat: %w", err)
 	}
+	defer tpOpenat.Close()
 
-	up, err := exe.Uprobe(uprobeSymbol, objs.UprobeUvSpawn, nil)
+	tpOpenat2, err := link.Tracepoint("syscalls", "sys_enter_openat2", objs.TpOpenat2, nil)
 	if err != nil {
-		return fmt.Errorf("attach uprobe %s: %w", uprobeSymbol, err)
+		return fmt.Errorf("attach tracepoint sys_enter_openat2: %w", err)
 	}
-	defer up.Close()
+	defer tpOpenat2.Close()
 
-	kpExecve, err := link.Kprobe("__x64_sys_execve", objs.KpExecve, nil)
+	tpExecve, err := link.Tracepoint("syscalls", "sys_enter_execve", objs.TpExecve, nil)
 	if err != nil {
-		return fmt.Errorf("attach kprobe execve: %w", err)
+		return fmt.Errorf("attach tracepoint sys_enter_execve: %w", err)
 	}
-	defer kpExecve.Close()
+	defer tpExecve.Close()
 
-	kpExecveat, err := link.Kprobe("__x64_sys_execveat", objs.KpExecveat, nil)
+	tpExecveat, err := link.Tracepoint("syscalls", "sys_enter_execveat", objs.TpExecveat, nil)
 	if err != nil {
-		return fmt.Errorf("attach kprobe execveat: %w", err)
+		return fmt.Errorf("attach tracepoint sys_enter_execveat: %w", err)
 	}
-	defer kpExecveat.Close()
+	defer tpExecveat.Close()
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
@@ -119,74 +116,19 @@ func (m *Module) Start(ctx context.Context, sink func(CommandEvent)) error {
 	}
 }
 
-func resolveClaudeBinary(configured string) (string, error) {
-	if p := strings.TrimSpace(configured); p != "" {
-		return p, nil
-	}
-
-	// 1) Prefer whereis for deterministic system-level resolution.
-	if path, ok := findByWhereis("claude", "bun", "claude-code"); ok {
-		return path, nil
-	}
-	// 2) Fallback to PATH lookup.
-	for _, name := range []string{"claude", "bun", "claude-code"} {
-		if p, err := exec.LookPath(name); err == nil {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("cannot locate claude/bun binary; set command_ebpf.claude_bin in config.yaml")
-}
-
-func findByWhereis(names ...string) (string, bool) {
-	args := append([]string{"-b"}, names...)
-	out, err := exec.Command("whereis", args...).Output()
-	if err != nil {
-		return "", false
-	}
-	return parseWhereisOutput(string(out))
-}
-
-func parseWhereisOutput(out string) (string, bool) {
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		for _, p := range fields[1:] {
-			if strings.HasSuffix(p, ":") {
-				continue
-			}
-			if abs, err := filepath.Abs(p); err == nil && isExecutable(abs) {
-				return abs, true
-			}
-			if isExecutable(p) {
-				return p, true
-			}
-		}
-	}
-	return "", false
-}
-
-func isExecutable(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return false
-	}
-	return info.Mode()&0111 != 0
-}
-
 func decodeBPFEvent(raw []byte) (CommandEvent, bool) {
 	var e bpfEvent
 	if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &e); err != nil {
 		return CommandEvent{}, false
 	}
 
-	source := cString(e.Source[:])
 	file := cString(e.File[:])
 	arg0 := cString(e.Arg0[:])
 	arg1 := cString(e.Arg1[:])
-	command := joinCommandParts(file, arg0, arg1)
+	arg2 := cString(e.Arg2[:])
+	source := cString(e.Source[:])
+
+	command := resolveCommand(source, file, arg0, arg1, arg2)
 	if command == "" {
 		return CommandEvent{}, false
 	}
@@ -200,16 +142,53 @@ func decodeBPFEvent(raw []byte) (CommandEvent, bool) {
 	}, true
 }
 
-func joinCommandParts(file, arg0, arg1 string) string {
-	parts := make([]string, 0, 3)
-	if file != "" {
-		parts = append(parts, file)
+func resolveCommand(source, file, arg0, arg1, arg2 string) string {
+	switch source {
+	case "file_read", "file_write", "file_rw":
+		return strings.TrimSpace(file)
+	case "execve":
+		if shouldUnwrapShellCommand(file, arg0, arg1) && strings.TrimSpace(arg2) != "" {
+			return strings.TrimSpace(arg2)
+		}
+		return joinExecCommand(file, arg0, arg1, arg2)
+	default:
+		if strings.TrimSpace(file) != "" {
+			return strings.TrimSpace(file)
+		}
+		return joinExecCommand(file, arg0, arg1, arg2)
 	}
-	if arg0 != "" && arg0 != file {
-		parts = append(parts, arg0)
+}
+
+func shouldUnwrapShellCommand(file, arg0, arg1 string) bool {
+	name := strings.ToLower(filepath.Base(strings.TrimSpace(file)))
+	if name == "" {
+		name = strings.ToLower(filepath.Base(strings.TrimSpace(arg0)))
 	}
-	if arg1 != "" {
-		parts = append(parts, arg1)
+	switch name {
+	case "sh", "bash", "zsh", "dash", "ksh", "fish":
+	default:
+		return false
+	}
+	a1 := strings.TrimSpace(arg1)
+	if !strings.HasPrefix(a1, "-") {
+		return false
+	}
+	return strings.Contains(a1, "c")
+}
+
+func joinExecCommand(file, arg0, arg1, arg2 string) string {
+	parts := make([]string, 0, 4)
+	if s := strings.TrimSpace(file); s != "" {
+		parts = append(parts, s)
+	}
+	if s := strings.TrimSpace(arg0); s != "" && s != strings.TrimSpace(file) {
+		parts = append(parts, s)
+	}
+	if s := strings.TrimSpace(arg1); s != "" {
+		parts = append(parts, s)
+	}
+	if s := strings.TrimSpace(arg2); s != "" {
+		parts = append(parts, s)
 	}
 	return strings.TrimSpace(strings.Join(parts, " "))
 }

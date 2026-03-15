@@ -54,9 +54,10 @@ type claudeCmdSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type claudeCmdProgramSpecs struct {
-	KpExecve      *ebpf.ProgramSpec `ebpf:"kp_execve"`
-	KpExecveat    *ebpf.ProgramSpec `ebpf:"kp_execveat"`
-	UprobeUvSpawn *ebpf.ProgramSpec `ebpf:"uprobe_uv_spawn"`
+	TpExecve   *ebpf.ProgramSpec `ebpf:"tp_execve"`
+	TpExecveat *ebpf.ProgramSpec `ebpf:"tp_execveat"`
+	TpOpenat   *ebpf.ProgramSpec `ebpf:"tp_openat"`
+	TpOpenat2  *ebpf.ProgramSpec `ebpf:"tp_openat2"`
 }
 
 // claudeCmdMapSpecs contains maps before they are loaded into the kernel.
@@ -111,16 +112,18 @@ type claudeCmdVariables struct {
 //
 // It can be passed to loadClaudeCmdObjects or ebpf.CollectionSpec.LoadAndAssign.
 type claudeCmdPrograms struct {
-	KpExecve      *ebpf.Program `ebpf:"kp_execve"`
-	KpExecveat    *ebpf.Program `ebpf:"kp_execveat"`
-	UprobeUvSpawn *ebpf.Program `ebpf:"uprobe_uv_spawn"`
+	TpExecve   *ebpf.Program `ebpf:"tp_execve"`
+	TpExecveat *ebpf.Program `ebpf:"tp_execveat"`
+	TpOpenat   *ebpf.Program `ebpf:"tp_openat"`
+	TpOpenat2  *ebpf.Program `ebpf:"tp_openat2"`
 }
 
 func (p *claudeCmdPrograms) Close() error {
 	return _ClaudeCmdClose(
-		p.KpExecve,
-		p.KpExecveat,
-		p.UprobeUvSpawn,
+		p.TpExecve,
+		p.TpExecveat,
+		p.TpOpenat,
+		p.TpOpenat2,
 	)
 }
 

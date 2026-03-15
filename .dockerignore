@@ -1,0 +1,7 @@
+.git
+.idea
+README.zh.md
+stream.md
+claude_probe
+*.log
+tmp
